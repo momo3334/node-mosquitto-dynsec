@@ -1,264 +1,277 @@
-
 import {connect, MqttClient} from "mqtt";
-import {AddRoleACLRequest, CreateClientRequest, GetClientResponse, ListClientsResponse, ListGroupsResponse, ListRequest, ListRolesResponse, RemoveRoleACLRequest} from "./command_types";
+import {
+    AddRoleACLRequest,
+    CreateClientRequest,
+    GetClientResponse,
+    ListClientsResponse,
+    ListGroupsResponse,
+    ListRequest,
+    ListRolesResponse,
+    RemoveRoleACLRequest
+} from "./command_types";
 
 
 export interface ConnectOptions {
-  hostname?: string;
-  port?: number;
-  protocol?: string;
-  username?: string;
-  password?: string;
+    hostname?: string;
+    port?: number;
+    protocol?: string;
+    username?: string;
+    password?: string;
 }
 
 export interface CommandPayload {
-  command: string;
-  [opt: string]: string;
+    command: string;
+
+    [opt: string]: string;
 }
 
 export interface CommandResponse {
-  command: string;
-  data?: object;
-  error?: string;
+    command: string;
+    data?: object;
+    error?: string;
 }
 
 export interface ResponseTopicPayload {
-  responses?: CommandResponse[];
+    responses?: CommandResponse[];
 }
 
 interface PendingCommand {
-  resolve: (data?: object) => void;
-  reject: (error?: string) => void;
+    resolve: (data?: object) => void;
+    reject: (error?: string) => void;
 }
 
 type DefaultAclType = "publishClientSend" | "publishClientReceive" | "subscribe" | "unsubscribe"
+
 interface DefaultACLEntry {
-  acltype: DefaultAclType;
-  allow: boolean;
+    acltype: DefaultAclType;
+    allow: boolean;
 }
 
 export class MosquittoDynsec {
 
-  private mqtt?: MqttClient
-  private pendingCommands: {[commandName: string]: PendingCommand} = {}
-  private apiVersion = "v1"
+    private mqtt?: MqttClient
+    private pendingCommands: { [commandName: string]: PendingCommand } = {}
+    private apiVersion = "v1"
 
-  timeoutSeconds = 2
+    timeoutSeconds = 2
 
-  private onCommandResponse(topic: string, payload: ResponseTopicPayload) {
+    private onCommandResponse(topic: string, payload: ResponseTopicPayload) {
 
-    if (!Array.isArray(payload.responses))
-      throw new Error("Invalid ResponseTopicPayload")
+        if (!Array.isArray(payload.responses))
+            throw new Error("Invalid ResponseTopicPayload")
 
-    // resolve pending promises
-    payload.responses.forEach((res: CommandResponse) => {
+        // resolve pending promises
+        payload.responses.forEach((res: CommandResponse) => {
 
-      // console.log("Got command response: ", res)
-      const pendingCommand = this.pendingCommands[res.command]
-      if (!pendingCommand)
-        return console.warn(`Received response for unsent command '${res.command}'`, res.data)
+            // console.log("Got command response: ", res)
+            const pendingCommand = this.pendingCommands[res.command]
+            if (!pendingCommand)
+                return console.warn(`Received response for unsent command '${res.command}'`, res.data)
 
-      delete this.pendingCommands[res.command]
-      if (res.error) {
-        // console.log("rejecting command", res.command, res.error)
-        pendingCommand.reject(res.error)
-      }
-      else {
-        // console.log("resolving command", res.command, res.data)
-        pendingCommand.resolve(res.data)
-      }
+            delete this.pendingCommands[res.command]
+            if (res.error) {
+                // console.log("rejecting command", res.command, res.error)
+                pendingCommand.reject(res.error)
+            } else {
+                // console.log("resolving command", res.command, res.data)
+                pendingCommand.resolve(res.data)
+            }
 
-    })
-  }
+        })
+    }
 
-  setConnection(mqtt: MqttClient) {
-    this.mqtt = mqtt
-  }
-
-  connect(options: ConnectOptions = {}): Promise<void> {
-
-    // set defaults
-    const hostname = options.hostname || "localhost"
-    const port = options.port || 1883
-    const protocol = options.protocol || "mqtt"
-    const username = options.username || "admin-user"
-    const password = options.password
-
-    const url = `${protocol}://${hostname}:${port}`
-
-    const mqtt = connect(url, {username, password})
-
-    const responseTopic = "$CONTROL/dynamic-security/" + this.apiVersion + "/response"
-
-    mqtt.on("message", (topic, payload) => {
-
-      this.onCommandResponse.call(this, topic, JSON.parse(String(payload)))
-    })
-
-    return new Promise<void>((resolve, reject) => {
-
-      mqtt.on("error", () => {reject()})
-      mqtt.on("connect", () => {
-        // console.log("on-connect")
-        mqtt.subscribe(responseTopic)
+    setConnection(mqtt: MqttClient) {
         this.mqtt = mqtt
-        resolve()
-      })
-    })
-  }
+    }
 
-  disconnect(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      if (!this.mqtt) return resolve()
-      this.mqtt.end(true, {}, resolve)
-    })
-  }
+    connect(options: ConnectOptions = {}): Promise<void> {
 
-  sendCommand(commandName: string, commandParams: object = {}): Promise<object | void> {
+        // set defaults
+        const hostname = options.hostname || "localhost"
+        const port = options.port || 1883
+        const protocol = options.protocol || "mqtt"
+        const username = options.username || "admin-user"
+        const password = options.password
 
-    if (!this.mqtt)
-      throw new Error("Can't sendCommand: not connected yet.")
+        const url = `${protocol}://${hostname}:${port}`
 
-    // command pending
-    if (this.pendingCommands[commandName])
-      throw new Error(`Command ${commandName} already is pending.`)
+        const mqtt = connect(url, {username, password})
 
-    // create pending command
-    const commandPromise = new Promise<object | void>((resolve, reject) => {
-      this.pendingCommands[commandName] = {resolve, reject}
-    })
+        const responseTopic = "$CONTROL/dynamic-security/" + this.apiVersion + "/response"
 
-    // send command
-    const command: CommandPayload = Object.assign({}, commandParams, {command: commandName})
-    const payload = JSON.stringify({commands: [command]})
-    this.mqtt.publish("$CONTROL/dynamic-security/v1", payload)
+        mqtt.on("message", (topic, payload) => {
 
-    const timeoutPromise = new Promise<object>((resolve, reject) => {
-      setTimeout(() => reject("COMMAND_TIMEOUT"), 1000 * this.timeoutSeconds)
-    })
+            this.onCommandResponse.call(this, topic, JSON.parse(String(payload)))
+        })
 
-    return Promise.race<Promise<object | void>>([commandPromise, timeoutPromise])
-  }
+        return new Promise<void>((resolve, reject) => {
 
-  async getDefaultACLAccess(acltype: DefaultAclType) {
-    const res = await (this.sendCommand("getDefaultACLAccess", {acltype}) as Promise<any>)
-    return res.acls
-  }
+            mqtt.on("error", () => {
+                reject()
+            })
+            mqtt.on("connect", () => {
+                // console.log("on-connect")
+                mqtt.subscribe(responseTopic)
+                this.mqtt = mqtt
+                resolve()
+            })
+        })
+    }
 
-  setDefaultACLAccess(acls: DefaultACLEntry[]) {
-    return this.sendCommand("setDefaultACLAccess", {acls}) as Promise<void>
-  }
+    disconnect(): Promise<void> {
+        return new Promise<void>((resolve) => {
+            if (!this.mqtt) return resolve()
+            this.mqtt.end(true,
+                {},
+                error => resolve())
+        })
+    }
 
-  listClients(params: ListRequest = {}) {
-    return this.sendCommand("listClients", params) as Promise<ListClientsResponse>
-  }
+    sendCommand(commandName: string, commandParams: object = {}): Promise<object | void> {
 
-  createClient(params: CreateClientRequest) {
-    return this.sendCommand("createClient", params) as Promise<void>
-  }
+        if (!this.mqtt)
+            throw new Error("Can't sendCommand: not connected yet.")
 
-  deleteClient(username: string) {
-    return this.sendCommand("deleteClient", {username})
-  }
+        // command pending
+        if (this.pendingCommands[commandName])
+            throw new Error(`Command ${commandName} already is pending.`)
 
-  setClientId(username: string, clientid: string) {
-    return this.sendCommand("setClientId", {username, clientid})
-  }
+        // create pending command
+        const commandPromise = new Promise<object | void>((resolve, reject) => {
+            this.pendingCommands[commandName] = {resolve, reject}
+        })
 
-  setClientPassword(username: string, password: string) {
-    return this.sendCommand("setClientPassword", {username, password}) as Promise<void>
-  }
+        // send command
+        const command: CommandPayload = Object.assign({}, commandParams, {command: commandName})
+        const payload = JSON.stringify({commands: [command]})
+        this.mqtt.publish("$CONTROL/dynamic-security/v1", payload)
 
-  async getClient(username: string): Promise<GetClientResponse> {
-    const promise = this.sendCommand("getClient", {username}) as Promise<{client: GetClientResponse}>
-    const res = await promise
-    return res.client
-  }
+        const timeoutPromise = new Promise<object>((resolve, reject) => {
+            setTimeout(() => reject("COMMAND_TIMEOUT"), 1000 * this.timeoutSeconds)
+        })
 
-  addClientRole(username: string, rolename: string, priority?: number) {
-    return this.sendCommand("addClientRole", {username, rolename, priority}) as Promise<void>
-  }
+        return Promise.race<Promise<object | void>>([commandPromise, timeoutPromise])
+    }
 
-  removeClientRole(username: string, rolename: string) {
-    return this.sendCommand("removeClientRole", {username, rolename}) as Promise<void>
-  }
+    async getDefaultACLAccess(acltype: DefaultAclType) {
+        const res = await (this.sendCommand("getDefaultACLAccess", {acltype}) as Promise<any>)
+        return res.acls
+    }
 
-  enableClient(username: string) {
-    return this.sendCommand("enableClient", {username}) as Promise<void>
-  }
+    setDefaultACLAccess(acls: DefaultACLEntry[]) {
+        return this.sendCommand("setDefaultACLAccess", {acls}) as Promise<void>
+    }
 
-  disableClient(username: string) {
-    return this.sendCommand("disableClient", {username}) as Promise<void>
-  }
+    listClients(params: ListRequest = {}) {
+        return this.sendCommand("listClients", params) as Promise<ListClientsResponse>
+    }
 
-  // role commands
+    createClient(params: CreateClientRequest) {
+        return this.sendCommand("createClient", params) as Promise<void>
+    }
 
-  createRole(rolename: string) {
-    return this.sendCommand("createRole", {rolename}) as Promise<void>
-  }
+    deleteClient(username: string) {
+        return this.sendCommand("deleteClient", {username})
+    }
 
-  deleteRole(rolename: string) {
-    return this.sendCommand("deleteRole", {rolename}) as Promise<void>
-  }
+    setClientId(username: string, clientid: string) {
+        return this.sendCommand("setClientId", {username, clientid})
+    }
 
-  async getRole(rolename: string): Promise<{rolename: string; acls: string[]}> {
-    const res = await (this.sendCommand("getRole", {rolename}) as Promise<any>)
-    return res.role
-  }
+    setClientPassword(username: string, password: string) {
+        return this.sendCommand("setClientPassword", {username, password}) as Promise<void>
+    }
 
-  listRoles(params: ListRequest = {}) {
-    return this.sendCommand("listRoles", params) as Promise<ListRolesResponse>
-  }
+    async getClient(username: string): Promise<GetClientResponse> {
+        const promise = this.sendCommand("getClient", {username}) as Promise<{ client: GetClientResponse }>
+        const res = await promise
+        return res.client
+    }
 
-  addRoleACL(params: AddRoleACLRequest) {
-    return this.sendCommand("addRoleACL", params) as Promise<void>
-  }
+    addClientRole(username: string, rolename: string, priority?: number) {
+        return this.sendCommand("addClientRole", {username, rolename, priority}) as Promise<void>
+    }
 
-  removeRoleACL(params: RemoveRoleACLRequest) {
-    return this.sendCommand("removeRoleACL", params) as Promise<void>
-  }
+    removeClientRole(username: string, rolename: string) {
+        return this.sendCommand("removeClientRole", {username, rolename}) as Promise<void>
+    }
 
-  // group commands
+    enableClient(username: string) {
+        return this.sendCommand("enableClient", {username}) as Promise<void>
+    }
 
-  createGroup(groupname: string) {
-    return this.sendCommand("createGroup", {groupname}) as Promise<void>
-  }
+    disableClient(username: string) {
+        return this.sendCommand("disableClient", {username}) as Promise<void>
+    }
 
-  deleteGroup(groupname: string) {
-    return this.sendCommand("deleteGroup", {groupname}) as Promise<void>
-  }
+    // role commands
 
-  listGroups(params: ListRequest = {}) {
-    return this.sendCommand("listGroups", params) as Promise<ListGroupsResponse>
-  }
+    createRole(rolename: string) {
+        return this.sendCommand("createRole", {rolename}) as Promise<void>
+    }
 
-  async getGroup(groupname: string) {
-    const res = await (this.sendCommand("getGroup", {groupname}) as Promise<any>)
-    return res.group
-  }
+    deleteRole(rolename: string) {
+        return this.sendCommand("deleteRole", {rolename}) as Promise<void>
+    }
 
-  async getAnonymousGroup() {
-    const res = await (this.sendCommand("getAnonymousGroup") as Promise<any>)
-    return res.group
-  }
+    async getRole(rolename: string): Promise<{ rolename: string; acls: string[] }> {
+        const res = await (this.sendCommand("getRole", {rolename}) as Promise<any>)
+        return res.role
+    }
 
-  setAnonymousGroup(groupname: string) {
-    return this.sendCommand("setAnonymousGroup", {groupname}) as Promise<void>
-  }
+    listRoles(params: ListRequest = {}) {
+        return this.sendCommand("listRoles", params) as Promise<ListRolesResponse>
+    }
 
-  addGroupClient(groupname: string, username: string) {
-    return this.sendCommand("addGroupClient", {groupname, username}) as Promise<void>
-  }
+    addRoleACL(params: AddRoleACLRequest) {
+        return this.sendCommand("addRoleACL", params) as Promise<void>
+    }
 
-  removeGroupClient(groupname: string, username: string) {
-    return this.sendCommand("removeGroupClient", {groupname, username}) as Promise<void>
-  }
+    removeRoleACL(params: RemoveRoleACLRequest) {
+        return this.sendCommand("removeRoleACL", params) as Promise<void>
+    }
 
-  addGroupRole(groupname: string, rolename: string, priority?: number) {
-    return this.sendCommand("addGroupRole", {groupname, rolename, priority}) as Promise<void>
-  }
+    // group commands
 
-  removeGroupRole(groupname: string, rolename: string) {
-    return this.sendCommand("removeGroupRole", {groupname, rolename}) as Promise<void>
-  }
+    createGroup(groupname: string) {
+        return this.sendCommand("createGroup", {groupname}) as Promise<void>
+    }
+
+    deleteGroup(groupname: string) {
+        return this.sendCommand("deleteGroup", {groupname}) as Promise<void>
+    }
+
+    listGroups(params: ListRequest = {}) {
+        return this.sendCommand("listGroups", params) as Promise<ListGroupsResponse>
+    }
+
+    async getGroup(groupname: string) {
+        const res = await (this.sendCommand("getGroup", {groupname}) as Promise<any>)
+        return res.group
+    }
+
+    async getAnonymousGroup() {
+        const res = await (this.sendCommand("getAnonymousGroup") as Promise<any>)
+        return res.group
+    }
+
+    setAnonymousGroup(groupname: string) {
+        return this.sendCommand("setAnonymousGroup", {groupname}) as Promise<void>
+    }
+
+    addGroupClient(groupname: string, username: string) {
+        return this.sendCommand("addGroupClient", {groupname, username}) as Promise<void>
+    }
+
+    removeGroupClient(groupname: string, username: string) {
+        return this.sendCommand("removeGroupClient", {groupname, username}) as Promise<void>
+    }
+
+    addGroupRole(groupname: string, rolename: string, priority?: number) {
+        return this.sendCommand("addGroupRole", {groupname, rolename, priority}) as Promise<void>
+    }
+
+    removeGroupRole(groupname: string, rolename: string) {
+        return this.sendCommand("removeGroupRole", {groupname, rolename}) as Promise<void>
+    }
 }
